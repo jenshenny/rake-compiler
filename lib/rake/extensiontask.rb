@@ -2,6 +2,7 @@ require "rbconfig"
 require "shellwords"
 
 require 'rake/baseextensiontask'
+require 'rake/system_requirements'
 require "rubygems/package_task"
 
 # Define a series of tasks to aid in the compilation of C extensions for
@@ -15,6 +16,11 @@ module Rake
     attr_writer :cross_config_options
     attr_accessor :no_native
     attr_accessor :config_includes
+    # When true (default), auto-derive system requirements (glibc, libstdc++) from
+    # the built binaries for Linux (non-musl) native gems and record them in
+    # spec.metadata as "system_requirement_<name>". Set to false to opt out, or set
+    # the metadata yourself to override any individual requirement.
+    attr_accessor :auto_system_requirements
 
     def init(name = nil, gem_spec = nil)
       super
@@ -26,6 +32,7 @@ module Rake
       @cross_compiling = nil
       @no_native = (ENV["RAKE_EXTENSION_TASK_NO_NATIVE"] == "true")
       @config_includes = []
+      @auto_system_requirements = true
       # Default to an empty list of ruby versions for each platform
       @ruby_versions_per_platform = Hash.new { |h, k| h[k] = [] }
       @make = nil
@@ -302,6 +309,25 @@ Java extension should be preferred.
 
           # include the files in the gem specification
           spec.files += ext_files
+
+          # auto-derive system requirements (glibc, libstdc++) from the built
+          # binaries (Linux, non-musl) and record them via add_system_requirement.
+          # Done before the callback so an author can still override, and each is
+          # only set if the author hasn't already declared it.
+          if @auto_system_requirements &&
+             spec.platform.os == "linux" && spec.platform.version != "musl"
+            so_paths = ext_files.select { |f| f.end_with?(".so") }
+                                .map { |f| File.join(stage_path, f) }
+            requirements = Rake::SystemRequirements.derive(so_paths)
+            unless requirements.empty?
+              # dup so we don't mutate the original gem_spec's metadata hash
+              spec.metadata = spec.metadata.dup
+              requirements.each do |name, req|
+                next if spec.metadata.key?("system_requirement_#{name}")
+                spec.add_system_requirement(name, req)
+              end
+            end
+          end
 
           # expose gem specification for customization
           callback.call(spec) if callback
